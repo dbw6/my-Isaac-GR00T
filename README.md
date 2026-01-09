@@ -104,6 +104,7 @@ GR00T uses [uv](https://github.com/astral-sh/uv) for fast, reproducible dependen
 After installing uv, create the environment and install GR00T:
 
 ```sh
+uv python install 3.10
 uv sync --python 3.10
 uv pip install -e .
 ```
