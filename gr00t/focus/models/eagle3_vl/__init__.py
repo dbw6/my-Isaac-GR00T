@@ -1,0 +1,2 @@
+from .modeling_eagle3_vl import Eagle3_VLForConditionalGeneration_focus_forward
+

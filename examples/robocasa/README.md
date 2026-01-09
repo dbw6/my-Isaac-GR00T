@@ -37,6 +37,8 @@ Checkpoint: [nvidia/GR00T-N1.6-3B](https://huggingface.co/nvidia/GR00T-N1.6-3B)
 
 # Evaluate checkpoint
 
+## Setup
+
 First, setup the evaluation simulation environment. This only needs to run once for each simulation benchmark. After it's done, we only need to launch server and client.
 
 ```bash
@@ -45,7 +47,42 @@ sudo apt install libegl1-mesa-dev libglu1-mesa
 bash gr00t/eval/sim/robocasa/setup_RoboCasa.sh
 ```
 
-Then, run client server evaluation under the project root directory in separate terminals:
+## Evaluate All Tasks
+
+To reproduce the evaluation results and get the average success rate, run the evaluation script that evaluates all 24 tasks:
+
+**Terminal 1 - Server:**
+```bash
+uv run python gr00t/eval/run_gr00t_server.py \
+    --model-path nvidia/GR00T-N1.6-3B \
+    --embodiment-tag ROBOCASA_PANDA_OMRON \
+    --use-sim-policy-wrapper
+```
+
+**Terminal 2 - Client (run from project root):**
+```bash
+cd examples/robocasa
+./evaluate_all_tasks.sh --output_dir ./results
+```
+
+The script will:
+- Evaluate all 24 RoboCasa tasks sequentially
+- Save results to a timestamped file in the output directory
+- Display progress and summary
+
+After evaluation completes, calculate the average success rate:
+```bash
+./calc_average_success.sh ./results/results_*.txt
+```
+
+Or specify the results file directly:
+```bash
+./calc_average_success.sh ./results/results_YYYYMMDD_HHMMSS.txt
+```
+
+## Evaluate Single Task
+
+To evaluate a single task, run client server evaluation under the project root directory in separate terminals:
 
 **Terminal 1 - Server:**
 ```bash
@@ -66,3 +103,14 @@ gr00t/eval/sim/robocasa/robocasa_uv/.venv/bin/python gr00t/eval/rollout_policy.p
     --n_action_steps 8 \
     --n_envs 5
 ```
+
+## Script Options
+
+The `evaluate_all_tasks.sh` script supports the following options:
+- `--n_episodes N`: Number of episodes per task (default: 10)
+- `--policy_client_host HOST`: Policy server host (default: 127.0.0.1)
+- `--policy_client_port PORT`: Policy server port (default: 5555)
+- `--n_envs N`: Number of parallel environments (default: 5)
+- `--n_action_steps N`: Number of action steps (default: 8)
+- `--max_episode_steps N`: Maximum episode steps (default: 720)
+- `--output_dir DIR`: Directory to save results (default: no saving)

@@ -49,6 +49,28 @@ class ServerConfig:
     use_sim_policy_wrapper: bool = False
     """Whether to use the sim policy wrapper"""
 
+    # Focus algorithm configs
+    focus: bool = False
+    """Enable Focus algorithm for VLM optimization"""
+
+    similarity_threshold: float = -1.0
+    """Similarity threshold for Focus algorithm (-1.0 to use default from config)"""
+
+    block_size: int = 2
+    """Block size for Focus algorithm"""
+
+    frame_block_size: int = 2
+    """Frame block size for Focus algorithm"""
+
+    alpha_list: str = ""
+    """Comma-separated list of alpha values for Focus layers"""
+
+    selected_layers: str = ""
+    """Comma-separated list of layer indices to apply Focus"""
+
+    vector_size: int = 32
+    """Vector size for Focus SEC compression (default matches Focus class)"""
+
 
 def main(config: ServerConfig):
     print("Starting GR00T inference server...")
@@ -57,10 +79,29 @@ def main(config: ServerConfig):
     print(f"  Device: {config.device}")
     print(f"  Host: {config.host}")
     print(f"  Port: {config.port}")
+    if config.focus:
+        print(f"  Focus: Enabled")
+        print(f"    similarity_threshold: {config.similarity_threshold}")
+        print(f"    block_size: {config.block_size}")
+        print(f"    vector_size: {config.vector_size}")
+        print(f"    selected_layers: {config.selected_layers}")
 
     # check if the model path exists
     if config.model_path.startswith("/") and not os.path.exists(config.model_path):
         raise FileNotFoundError(f"Model path {config.model_path} does not exist")
+
+    # Prepare Focus config if enabled
+    focus_config = None
+    if config.focus:
+        focus_config = {
+            "enabled": True,
+            "similarity_threshold": config.similarity_threshold,
+            "block_size": config.block_size,
+            "frame_block_size": config.frame_block_size,
+            "alpha_list": config.alpha_list,
+            "selected_layers": config.selected_layers,
+            "vector_size": config.vector_size,
+        }
 
     # Create and start the server
     if config.model_path is not None:
@@ -69,6 +110,7 @@ def main(config: ServerConfig):
             model_path=config.model_path,
             device=config.device,
             strict=config.strict,
+            focus_config=focus_config,
         )
     elif config.dataset_path is not None:
         if config.modality_config_path is None:

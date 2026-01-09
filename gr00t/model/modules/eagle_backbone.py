@@ -111,6 +111,30 @@ class EagleBackbone(torch.nn.Module):
         outputs = outputs["hidden_states"][-1]
         image_mask = vl_input["input_ids"] == self.model.config.image_token_index
         attention_mask = vl_input["attention_mask"] == 1
+        
+        # If Focus is enabled and has compressed tokens, adjust attention mask to match compressed sequence length
+        if hasattr(self.model, 'focus') and self.model.focus is not None:
+            if hasattr(self.model.focus, 'retained_ids') and self.model.focus.retained_ids is not None:
+                # Focus has compressed tokens - create compressed attention mask
+                compressed_seq_len = outputs.shape[1]
+                original_seq_len = attention_mask.shape[1]
+                
+                if original_seq_len != compressed_seq_len:
+                    # Compress attention mask using retained_ids
+                    # retained_ids shape: [num_retained_tokens] - indices of retained tokens
+                    retained_ids = self.model.focus.retained_ids
+                    
+                    # Ensure retained_ids is on the same device
+                    if retained_ids.device != attention_mask.device:
+                        retained_ids = retained_ids.to(attention_mask.device)
+                    
+                    # Compress 2D attention mask: [B, seq_len] -> [B, compressed_seq_len]
+                    attention_mask = attention_mask[:, retained_ids]
+                    
+                    # Also compress image_mask if needed
+                    if image_mask.shape[1] == original_seq_len:
+                        image_mask = image_mask[:, retained_ids]
+        
         return BatchFeature(
             data={
                 "backbone_features": outputs,

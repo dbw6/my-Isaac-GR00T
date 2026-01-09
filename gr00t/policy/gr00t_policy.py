@@ -63,6 +63,7 @@ class Gr00tPolicy(BasePolicy):
         *,
         device: int | str,
         strict: bool = True,
+        focus_config: dict | None = None,
     ):
         """Initialize the Gr00t Policy.
 
@@ -71,6 +72,13 @@ class Gr00tPolicy(BasePolicy):
             model_path: Path to the pretrained model checkpoint directory
             device: Device to run the model on (e.g., 'cuda:0', 0, 'cpu')
             strict: Whether to enforce strict input validation (default: True)
+            focus_config: Optional Focus algorithm configuration dict with keys:
+                - enabled: bool - Whether Focus is enabled
+                - similarity_threshold: float - Similarity threshold
+                - block_size: int - Block size for Focus
+                - frame_block_size: int - Frame block size
+                - alpha_list: str - Comma-separated alpha values
+                - selected_layers: str - Comma-separated layer indices
         """
         # Import this to register all models.
         import gr00t.model  # noqa: F401
@@ -83,6 +91,12 @@ class Gr00tPolicy(BasePolicy):
         model.eval()  # Set model to evaluation mode
         model.to(device=device, dtype=torch.bfloat16)
         self.model = model
+
+        # Apply Focus algorithm to the backbone if enabled
+        self.focus_enabled = False
+        if focus_config is not None and focus_config.get("enabled", False):
+            self._apply_focus(focus_config)
+            self.focus_enabled = True
 
         # Load the processor for input/output transformation
         self.processor: BaseProcessor = AutoProcessor.from_pretrained(model_dir)
@@ -100,6 +114,73 @@ class Gr00tPolicy(BasePolicy):
         assert len(language_delta_indices) == 1, "Only one language delta index is supported"
         assert len(language_keys) == 1, "Only one language key is supported"
         self.language_key = language_keys[0]
+
+    def _apply_focus(self, focus_config: dict):
+        """Apply Focus algorithm to the backbone model using focus/interface.py.
+
+        Args:
+            focus_config: Focus configuration dictionary. If similarity_threshold is -1.0,
+                         will look up default config from gr00t/focus/configs/focus.csv
+        """
+        import os
+        import sys
+        
+        # Add focus directory to path for proper imports
+        focus_dir = os.path.join(os.path.dirname(__file__), "..", "focus")
+        if focus_dir not in sys.path:
+            sys.path.insert(0, focus_dir)
+        
+        from gr00t.focus.interface import apply_focus
+        
+        print("Applying Focus algorithm to GR00T backbone...")
+
+        # Get the backbone model (Eagle3_VLForConditionalGeneration)
+        backbone = self.model.backbone.model
+
+        # Create a simple args object compatible with apply_focus interface
+        class FocusArgs:
+            def __init__(self, config: dict, config_csv_path: str):
+                # Algorithm selection flags
+                self.focus = True
+                self.CMC = False
+                self.adaptiv = False
+                
+                # Model and task identification
+                self.model = "gr00t"
+                self.tasks = config.get("dataset", "inference")
+                
+                # Focus hyperparameters - use -1.0 to trigger CSV lookup
+                self.similarity_threshold = config.get("similarity_threshold", -1.0)
+                self.block_size = config.get("block_size", 2)
+                self.frame_block_size = config.get("frame_block_size", 2)
+                self.alpha_list = config.get("alpha_list", "")
+                self.selected_layers = config.get("selected_layers", "")
+                
+                # Advanced Focus options with defaults (matching Focus class defaults)
+                self.gemm_m_size = config.get("gemm_m_size", None)
+                self.SEC_only = config.get("SEC_only", False)
+                self.vector_size = config.get("vector_size", 32)
+                
+                # Trace/export options - disabled for inference
+                self.export_focus_trace = config.get("export_focus_trace", False)
+                self.trace_dir = config.get("trace_dir", "")
+                self.trace_meta_dir = config.get("trace_meta_dir", "")
+                self.trace_name = config.get("trace_name", "")
+                self.use_median = config.get("use_median", True)
+                
+                # Store the config CSV path for Focus to use
+                self._config_csv_path = config_csv_path
+        
+        # Get the path to focus.csv for config lookup
+        config_csv_path = os.path.join(os.path.dirname(__file__), "..", "focus", "configs", "focus.csv")
+        
+        # Create args object
+        focus_args = FocusArgs(focus_config, config_csv_path)
+        
+        # Apply Focus using the interface function
+        apply_focus(backbone, focus_args)
+        
+        print("  Focus applied successfully via interface.apply_focus")
 
     def _unbatch_observation(self, value: dict[str, Any]) -> list[dict[str, Any]]:
         """Unbatch a batched observation into a list of single observations.
