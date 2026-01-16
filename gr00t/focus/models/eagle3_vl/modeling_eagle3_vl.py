@@ -64,100 +64,118 @@ def Eagle3_VLForConditionalGeneration_focus_forward(
 
     ### FOCUS METADATA PREPARATION START ###
     if hasattr(self, 'focus') and input_ids is not None:
-        # Get image token positions for each batch
-        # Note: Eagle3_VL may have multiple images with variable spatial shapes
-        # For simplicity, we handle the common case of uniform image sizes
-        
         image_token_mask = (input_ids == self.image_token_index)
         
-        # Only prepare Focus if there are image tokens
         if image_token_mask.any():
-            # Get the total number of image tokens per batch
-            # Assuming all batches have the same structure
-            batch_image_tokens = image_token_mask[0].sum().item()
+            # Get all image token positions for the first batch
+            image_positions = torch.where(image_token_mask[0])[0]
             
-            if batch_image_tokens > 0:
-                # Find the start and end positions of image tokens in the first batch
-                image_positions = torch.where(image_token_mask[0])[0]
-                image_token_start_index = image_positions[0].item()
-                image_token_end_index = image_positions[-1].item()
-                image_token_length = batch_image_tokens
-                original_length = N
-                
-                # Calculate patch dimensions
-                # Eagle3_VL uses pixel_shuffle_back with downsample_ratio (typically 0.5)
-                # The visual tokens are organized based on the downsampled spatial shapes
-                # For now, we estimate patch dimensions from the number of visual tokens
-                
-                # Try to get spatial information from the model's last extraction
-                # This is a simplified calculation - for variable image sizes,
-                # this would need to be more sophisticated
-                
-                # Estimate square patch size from number of tokens
-                # Each image contributes tokens based on its downsampled spatial shape
-                num_visual_tokens = vit_embeds.shape[0]
-                tokens_per_image = num_visual_tokens // max(num_images, 1)
-                
-                # Estimate patch dimensions (assuming roughly square images after downsampling)
-                import math
-                patch_size = int(math.sqrt(tokens_per_image))
-                if patch_size * patch_size != tokens_per_image:
-                    # Not a perfect square, try to find closest factors
-                    for h in range(int(math.sqrt(tokens_per_image)) + 1, 0, -1):
-                        if tokens_per_image % h == 0:
-                            patch_height = h
-                            patch_width = tokens_per_image // h
-                            break
-                    else:
-                        patch_height = patch_size
-                        patch_width = patch_size
+            # Group image positions by contiguous segments (one per image)
+            image_positions_list = image_positions.tolist()
+            image_groups = []
+            if image_positions_list:
+                group_start = 0
+                for idx in range(1, len(image_positions_list)):
+                    if image_positions_list[idx] != image_positions_list[idx - 1] + 1:
+                        image_groups.append(image_positions_list[group_start:idx])
+                        group_start = idx
+                image_groups.append(image_positions_list[group_start:])
+            
+            # Find start and end positions of image tokens only (ignore wrapper tokens)
+            # Create lists to store start and end positions for each image
+            image_token_start_indices = []
+            image_token_end_indices = []
+            
+            for group in image_groups:
+                if not group:
+                    continue
+                # Use the actual first and last image token positions for this image
+                image_token_start_indices.append(group[0])
+                image_token_end_indices.append(group[-1])
+            
+            image_token_length = image_positions.numel()
+            original_length = N
+            
+            # Calculate query_token_start_index and query_token_length
+            # For gr00t model, query tokens ("open the left drawer") are BEFORE the first image
+            # Format: <|im_start|>system\n...<|im_end|>\n<|im_start|>user\nopen the left drawer<image 1><img><IMG_CONTEXT>...
+            # <image 1> = 5 tokens, <img> = 1 token, so 6 tokens before first IMG_CONTEXT
+            first_image_start = image_token_start_indices[0] if image_token_start_indices else image_positions[0].item()
+            # Query text ends right before <image 1> wrapper
+            query_token_end_index = first_image_start - 6
+            
+            # Find where user query starts (after <|im_start|>user\n, exclude system prompt)
+            # Look for the second <|im_start|> token (first is system, second is user)
+            im_start_token_id = 151644  # <|im_start|> token ID
+            im_start_positions = torch.where(input_ids[0] == im_start_token_id)[0]
+            if len(im_start_positions) >= 2:
+                # User turn starts at second <|im_start|>
+                # Skip <|im_start|>user\n = 3 tokens (im_start + user + \n)
+                query_token_start_index = im_start_positions[1].item() + 3
+            else:
+                # Fallback: use position 0
+                query_token_start_index = 0
+            
+            query_token_length = query_token_end_index - query_token_start_index
+            
+            # Calculate patch dimensions from visual tokens
+            num_visual_tokens = vit_embeds.shape[0]
+            tokens_per_image = num_visual_tokens // max(num_images, 1)
+            if tokens_per_image == 0:
+                tokens_per_image = num_visual_tokens
+            
+            # Estimate patch dimensions (assuming roughly square images after downsampling)
+            import math
+            patch_size = int(math.sqrt(tokens_per_image))
+            if patch_size * patch_size != tokens_per_image:
+                # Find closest factors
+                for h in range(int(math.sqrt(tokens_per_image)) + 1, 0, -1):
+                    if tokens_per_image % h == 0:
+                        patch_height = h
+                        patch_width = tokens_per_image // h
+                        break
                 else:
                     patch_height = patch_size
                     patch_width = patch_size
-                
-                patch_num = patch_height * patch_width
-                n_frames = num_images  # Each image is treated as a "frame"
-                
-                # Calculate strides
-                frame_stride = patch_height * patch_width
-                height_stride = patch_width
-                width_stride = 1
-                
-                # Create patch_type tensor
-                # TEXT_TOKEN for text positions, patch indices for image positions
-                patch_type_list = []
-                patch_type_list.extend([TEXT_TOKEN] * image_token_start_index)
-                
-                # Add patch indices for each frame/image
-                for frame_idx in range(n_frames):
-                    tokens_this_frame = min(patch_num, image_token_length - frame_idx * patch_num)
-                    patch_type_list.extend(list(range(tokens_this_frame)))
-                
-                # Fill remaining with TEXT_TOKEN
-                patch_type_list.extend([TEXT_TOKEN] * (original_length - len(patch_type_list)))
-                
-                # Ensure patch_type has correct length
-                if len(patch_type_list) > original_length:
-                    patch_type_list = patch_type_list[:original_length]
-                elif len(patch_type_list) < original_length:
-                    patch_type_list.extend([TEXT_TOKEN] * (original_length - len(patch_type_list)))
-                
-                patch_type = torch.tensor([patch_type_list], device=input_ids.device)
-                
-                # Prepare Focus with metadata
-                self.focus.prepare(
-                    patch_type, 
-                    n_frames, 
-                    patch_height, 
-                    patch_width, 
-                    frame_stride, 
-                    height_stride, 
-                    width_stride, 
-                    image_token_start_index, 
-                    image_token_end_index, 
-                    image_token_length, 
-                    original_length
-                )
+            else:
+                patch_height = patch_size
+                patch_width = patch_size
+            
+            patch_num = patch_height * patch_width
+            n_frames = num_images
+            
+            # Calculate strides
+            frame_stride = patch_height * patch_width
+            height_stride = patch_width
+            width_stride = 1
+            
+            # Create patch_type tensor: TEXT_TOKEN for text, patch indices for image tokens
+            patch_type_list = [TEXT_TOKEN] * original_length
+            
+            # Assign patch indices to each image group (skip wrapper tokens between images)
+            for group in image_groups:
+                for patch_idx, pos in enumerate(group[:patch_num]):
+                    patch_type_list[pos] = patch_idx
+            
+            patch_type = torch.tensor([patch_type_list], device=input_ids.device)
+            
+            # Prepare Focus with metadata
+            # Pass lists of start and end indices for each image
+            self.focus.prepare(
+                patch_type, 
+                n_frames, 
+                patch_height, 
+                patch_width, 
+                frame_stride, 
+                height_stride, 
+                width_stride, 
+                image_token_start_indices,  # List of start indices for each image
+                image_token_end_indices,     # List of end indices for each image
+                image_token_length, 
+                original_length,
+                query_token_start_index,
+                query_token_length
+            )
     ### FOCUS METADATA PREPARATION END ###
 
     outputs = self.language_model(
@@ -195,4 +213,3 @@ def Eagle3_VLForConditionalGeneration_focus_forward(
         hidden_states=outputs.hidden_states,
         attentions=outputs.attentions,
     )
-

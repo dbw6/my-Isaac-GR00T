@@ -321,6 +321,7 @@ class AlternateVLDiT(DiT):
 
         image_attention_mask = image_mask & backbone_attention_mask
         non_image_attention_mask = (~image_mask) & backbone_attention_mask
+        # import pdb; pdb.set_trace()
 
         all_hidden_states = [hidden_states]
         assert self.config.interleave_self_attention, "Interleave self attention must be enabled"

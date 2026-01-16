@@ -167,3 +167,9 @@ offline_open_loop_eval_plots/
 /models
 /data
 /local_ffmpeg
+
+# Benchmark experiment results
+robocasa_benchmark_*/
+
+# Debug images
+debug_image_*.png

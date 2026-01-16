@@ -158,7 +158,7 @@ class Gr00tPolicy(BasePolicy):
                 
                 # Advanced Focus options with defaults (matching Focus class defaults)
                 self.gemm_m_size = config.get("gemm_m_size", None)
-                self.SEC_only = config.get("SEC_only", False)
+                self.SEC_only = config.get("SEC_only", True)
                 self.vector_size = config.get("vector_size", 32)
                 
                 # Trace/export options - disabled for inference
@@ -180,7 +180,26 @@ class Gr00tPolicy(BasePolicy):
         # Apply Focus using the interface function
         apply_focus(backbone, focus_args)
         
+        # Store reference to Focus object for sparsity reporting
+        self._focus_enabled = True
+        # Focus is attached to the language_model.model (Qwen3Model)
+        try:
+            self._focus_obj = backbone.language_model.model.focus
+        except AttributeError:
+            self._focus_obj = None
+        
         print("  Focus applied successfully via interface.apply_focus")
+    
+    def _get_focus_sparsity_stats(self) -> dict:
+        """Get sparsity statistics from Focus algorithm.
+        
+        Returns:
+            dict with VLM average sparsity and SEC final sparsity
+        """
+        if not hasattr(self, '_focus_obj') or self._focus_obj is None:
+            return {"vlm_avg_sparsity": 0.0, "sec_final_sparsity": 0.0}
+        
+        return self._focus_obj.get_sparsity_stats()
 
     def _unbatch_observation(self, value: dict[str, Any]) -> list[dict[str, Any]]:
         """Unbatch a batched observation into a list of single observations.
@@ -436,7 +455,13 @@ class Gr00tPolicy(BasePolicy):
         casted_action = {
             key: value.astype(np.float32) for key, value in unnormalized_action.items()
         }
-        return casted_action, {}
+        
+        # Get sparsity stats if Focus is enabled
+        info = {}
+        if hasattr(self, '_focus_enabled') and self._focus_enabled:
+            info["sparsity"] = self._get_focus_sparsity_stats()
+        
+        return casted_action, info
 
     def check_action(self, action: dict[str, Any]) -> None:
         """Validate that the action has the correct structure and types.

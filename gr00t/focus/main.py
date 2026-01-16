@@ -24,7 +24,7 @@ class Focus(nn.Module):
     gemm_m_size=None,
     alpha_list="",
     selected_layers="",
-    SEC_only=False,
+    SEC_only=True,
     model_name="",
     dataset_name="",
     export_focus_trace=False,
@@ -113,11 +113,27 @@ class Focus(nn.Module):
         if self.start_drop:
             hidden_states_out = self.recover_tokens(hidden_states_out)
 
-
-        if is_attention:
-            image_tokens = hidden_states_out[:, :, self.image_token_start_index:self.image_token_start_index+self.image_token_length, :].clone()
+        # Extract image tokens - handle gr00t's non-contiguous image segments
+        if self.model_name == 'gr00t' and isinstance(self.image_token_start_index, list):
+            # For gr00t: collect image tokens from multiple non-contiguous segments
+            image_token_segments = []
+            for start_idx, end_idx in zip(self.image_token_start_index, self.image_token_end_index):
+                if is_attention:
+                    segment = hidden_states_out[:, :, start_idx:end_idx+1, :].clone()
+                else:
+                    segment = hidden_states_out[:, start_idx:end_idx+1, :].clone()
+                image_token_segments.append(segment)
+            # Concatenate all segments along the sequence dimension
+            if is_attention:
+                image_tokens = torch.cat(image_token_segments, dim=2)
+            else:
+                image_tokens = torch.cat(image_token_segments, dim=1)
         else:
-            image_tokens = hidden_states_out[:, self.image_token_start_index:self.image_token_start_index+self.image_token_length, :].clone()
+            # Original: single contiguous image token range
+            if is_attention:
+                image_tokens = hidden_states_out[:, :, self.image_token_start_index:self.image_token_start_index+self.image_token_length, :].clone()
+            else:
+                image_tokens = hidden_states_out[:, self.image_token_start_index:self.image_token_start_index+self.image_token_length, :].clone()
 
         q_len_image = image_tokens.size(1) if len(image_tokens.shape) == 3 else image_tokens.size(2)
 
@@ -179,11 +195,23 @@ class Focus(nn.Module):
         if is_attention:
             image_tokens = image_tokens.view(bsz, -1, num_head, dim_per_head).transpose(1, 2).contiguous()
 
-
-        if is_attention:
-            hidden_states_out[:, :, self.image_token_start_index:self.image_token_start_index+self.image_token_length, :] = image_tokens
+        # Write back image tokens - handle gr00t's non-contiguous image segments
+        if self.model_name == 'gr00t' and isinstance(self.image_token_start_index, list):
+            # For gr00t: write back to multiple non-contiguous segments
+            offset = 0
+            for start_idx, end_idx in zip(self.image_token_start_index, self.image_token_end_index):
+                segment_len = end_idx - start_idx + 1
+                if is_attention:
+                    hidden_states_out[:, :, start_idx:end_idx+1, :] = image_tokens[:, :, offset:offset+segment_len, :]
+                else:
+                    hidden_states_out[:, start_idx:end_idx+1, :] = image_tokens[:, offset:offset+segment_len, :]
+                offset += segment_len
         else:
-            hidden_states_out[:, self.image_token_start_index:self.image_token_start_index+self.image_token_length, :] = image_tokens
+            # Original: single contiguous image token range
+            if is_attention:
+                hidden_states_out[:, :, self.image_token_start_index:self.image_token_start_index+self.image_token_length, :] = image_tokens
+            else:
+                hidden_states_out[:, self.image_token_start_index:self.image_token_start_index+self.image_token_length, :] = image_tokens
 
         if self.start_drop:
             hidden_states_out = self.drop_tokens(hidden_states_out)
@@ -414,13 +442,68 @@ class Focus(nn.Module):
 
             retained_ids = self.retained_ids if self.retained_ids is not None else torch.arange(0, seq_len, device=device)
             
-            # Validate retained_ids structure
-            if retained_ids.shape[0] < self.image_token_start_index + self.query_token_length:
-                raise ValueError(f"retained_ids too short: {retained_ids.shape[0]} < {self.image_token_start_index + self.query_token_length}")
-            
-            retained_ids_image = retained_ids[self.image_token_start_index:-self.query_token_length]
-            retained_ids_before_image = retained_ids[:self.image_token_start_index]
-            retained_ids_after_image = retained_ids[-self.query_token_length:]
+            if self.model_name == 'gr00t':
+                # For gr00t: images are in multiple groups with wrapper tokens between them
+                # Structure: [before_img1][IMG1][wrapper1][IMG2][wrapper2][IMG3][after_img3]
+                # We need to preserve wrapper tokens between images
+                
+                num_images = len(self.image_token_start_index)
+                
+                # Collect image token positions (for pruning)
+                # After first pruning, use tracked remaining positions to match token_importance
+                if self.start_drop and hasattr(self, '_gr00t_image_positions_remaining'):
+                    # Use the tracked remaining positions (matches token_importance size)
+                    image_positions = torch.tensor(self._gr00t_image_positions_remaining, device=device)
+                else:
+                    # First time, use all original positions
+                    image_positions = []
+                    for start, end in zip(self.image_token_start_index, self.image_token_end_index):
+                        image_positions.extend(range(start, end + 1))
+                    image_positions = torch.tensor(image_positions, device=device)
+                
+                # Build the full retained_ids by segments:
+                # NOTE: Since recover_tokens/recover_PE_and_AM restore everything to original_length,
+                # we're working with full-length tensors at original positions.
+                # We can simply use original position ranges directly.
+                
+                # 1. Tokens before first image (preserve all)
+                first_image_start = self.image_token_start_index[0]
+                retained_ids_before_first_image = torch.arange(0, first_image_start, device=device)
+                
+                # 2. For each image, collect wrapper tokens between images
+                wrapper_tokens_list = []
+                for i in range(num_images - 1):
+                    # Wrapper tokens between image i and image i+1
+                    wrapper_start = self.image_token_end_index[i] + 1
+                    wrapper_end = self.image_token_start_index[i + 1]
+                    if wrapper_end > wrapper_start:
+                        wrapper_tokens = torch.arange(wrapper_start, wrapper_end, device=device)
+                        wrapper_tokens_list.append(wrapper_tokens)
+                
+                # 3. Tokens after last image (preserve all)
+                last_image_end = self.image_token_end_index[-1]
+                retained_ids_after_last_image = torch.arange(last_image_end + 1, self.original_length, device=device)
+                
+                # retained_ids_image: only the actual image token positions (for pruning)
+                retained_ids_image = image_positions
+                
+                # After pruning image tokens, we need to reconstruct in correct order:
+                # [before_first][pruned_img1][wrapper1][pruned_img2][wrapper2][pruned_img3][after_last]
+                # But for simplicity, we first prune, then interleave
+                
+                # Store wrapper info for later reconstruction
+                self._gr00t_wrapper_tokens = wrapper_tokens_list
+                self._gr00t_before_first = retained_ids_before_first_image
+                self._gr00t_after_last = retained_ids_after_last_image
+            else:
+                # Original logic: query at the end
+                # Validate retained_ids structure
+                if retained_ids.shape[0] < self.image_token_start_index + self.query_token_length:
+                    raise ValueError(f"retained_ids too short: {retained_ids.shape[0]} < {self.image_token_start_index + self.query_token_length}")
+                
+                retained_ids_image = retained_ids[self.image_token_start_index:-self.query_token_length]
+                retained_ids_before_image = retained_ids[:self.image_token_start_index]
+                retained_ids_after_image = retained_ids[-self.query_token_length:]
 
             # Validate that we have enough image tokens
             if retained_ids_image.shape[0] == 0:
@@ -434,9 +517,48 @@ class Focus(nn.Module):
                 retained_ids_local = torch.unique(retained_ids_local)
 
             # use retained_ids_local to select the retained ids
-            retained_ids_image = retained_ids_image[retained_ids_local]
+            retained_ids_image_pruned = retained_ids_image[retained_ids_local]
 
-            retained_ids_full = torch.cat([retained_ids_before_image, retained_ids_image, retained_ids_after_image], dim=0).contiguous()
+            if self.model_name == 'gr00t':
+                # For gr00t: reconstruct with wrapper tokens between images
+                # Structure: [before_first][pruned_images][wrapper1][...][wrapper_n-1][after_last]
+                # But we need to interleave pruned images with wrappers properly
+                
+                num_images = len(self.image_token_start_index)
+                
+                # Get the original positions selected by topk
+                # retained_ids_image_pruned contains the original positions we want to keep
+                selected_orig_positions = retained_ids_image_pruned.tolist()
+                
+                # Group selected positions by which image they belong to
+                per_image_positions = [[] for _ in range(num_images)]
+                for orig_pos in selected_orig_positions:
+                    # Find which image this position belongs to
+                    for i in range(num_images):
+                        if self.image_token_start_index[i] <= orig_pos <= self.image_token_end_index[i]:
+                            per_image_positions[i].append(orig_pos)
+                            break
+                
+                # Build retained_ids_full with proper ordering
+                segments = [self._gr00t_before_first]
+                
+                for i in range(num_images):
+                    # Add pruned image tokens for this image
+                    if per_image_positions[i]:
+                        img_retained = torch.tensor(per_image_positions[i], device=device)
+                        segments.append(img_retained)
+                    
+                    # Add wrapper tokens after this image (if not the last image)
+                    if i < num_images - 1 and i < len(self._gr00t_wrapper_tokens):
+                        segments.append(self._gr00t_wrapper_tokens[i])
+                
+                segments.append(self._gr00t_after_last)
+                
+                # Filter out empty segments and concatenate
+                segments = [s for s in segments if s.numel() > 0]
+                retained_ids_full = torch.cat(segments, dim=0).contiguous()
+            else:
+                retained_ids_full = torch.cat([retained_ids_before_image, retained_ids_image_pruned, retained_ids_after_image], dim=0).contiguous()
 
             # Validate the final retained_ids_full
             if retained_ids_full.shape[0] == 0:
@@ -453,7 +575,7 @@ class Focus(nn.Module):
             # Add bounds checking before indexing
             if retained_ids_full.max().item() >= position_embeddings[0].shape[-2]:
                 raise ValueError(f"retained_ids_full index {retained_ids_full.max().item()} out of bounds for position_embeddings with shape {position_embeddings[-2].shape}")
-            
+                
             position_embeddings = list(position_embeddings)
             # Prune position embeddings based on their dimensions
             if position_embeddings[0].dim() == 3:
@@ -480,6 +602,13 @@ class Focus(nn.Module):
                 attention_mask = attention_mask[:, :, retained_ids_full, :][:, :, :, retained_ids_full]
 
             self.retained_ids = retained_ids_full
+            
+            # Update image_token_length_cur with the number of retained image tokens
+            if self.model_name == 'gr00t':
+                # Count retained image tokens
+                self.image_token_length_cur = sum(len(positions) for positions in per_image_positions)
+            else:
+                self.image_token_length_cur = retained_ids_image_pruned.shape[0]
 
         except RuntimeError as e:
             if "CUDA" in str(e):
@@ -502,8 +631,19 @@ class Focus(nn.Module):
         self.height_stride = height_stride
         self.width_stride = width_stride
 
-        self.image_token_start_index = image_token_start_index
-        self.image_token_end_index = image_token_end_index
+        # Handle lists for gr00t model (one start/end index per image)
+        if self.model_name == 'gr00t':
+            # Ensure indices are lists with length equal to num_frames
+            if not isinstance(image_token_start_index, list) or len(image_token_start_index) != num_frames:
+                raise ValueError(f"image_token_start_index must be a list of length {num_frames}")
+            if not isinstance(image_token_end_index, list) or len(image_token_end_index) != num_frames:
+                raise ValueError(f"image_token_end_index must be a list of length {num_frames}")
+            # Store the lists
+            self.image_token_start_index = image_token_start_index
+            self.image_token_end_index = image_token_end_index
+        else:
+            self.image_token_start_index = image_token_start_index
+            self.image_token_end_index = image_token_end_index
         self.image_token_length = image_token_length
         self.query_token_start_index = query_token_start_index if query_token_start_index is not None else image_token_end_index + 1
         self.query_token_length = query_token_length if query_token_length is not None else original_length - self.query_token_start_index
@@ -557,18 +697,74 @@ class Focus(nn.Module):
         assert q_len_0 == q_len_1 
         assert b == 1
 
-        # get text to image attentions
-        image_start_index = self.image_token_start_index
-        query_token_length = self.query_token_length
+        if self.model_name == 'gr00t':
+            # For gr00t: query tokens are BEFORE images, images are in multiple groups
+            # Query: positions query_token_start_index to query_token_start_index + query_token_length
+            # Images: multiple groups at image_token_start_index[i] to image_token_end_index[i]
+            
+            # Get original positions
+            orig_query_start = self.query_token_start_index
+            orig_query_end = orig_query_start + self.query_token_length
+            
+            # Collect all original image token positions from all three images
+            orig_image_positions = []
+            for start, end in zip(self.image_token_start_index, self.image_token_end_index):
+                orig_image_positions.extend(range(start, end + 1))
+            
+            # After pruning, we need to map original positions to current positions in attn_weights
+            if self.start_drop and self.retained_ids is not None:
+                # Map original positions to indices in retained_ids (which are the current positions)
+                retained_ids_list = self.retained_ids.tolist()
+                
+                # Find current positions for query tokens
+                query_current_positions = []
+                for orig_pos in range(orig_query_start, orig_query_end):
+                    if orig_pos in retained_ids_list:
+                        query_current_positions.append(retained_ids_list.index(orig_pos))
+                
+                # Find current positions for image tokens AND track their original positions
+                image_current_positions = []
+                image_orig_positions_remaining = []  # Track which original positions are still present
+                for orig_pos in orig_image_positions:
+                    if orig_pos in retained_ids_list:
+                        image_current_positions.append(retained_ids_list.index(orig_pos))
+                        image_orig_positions_remaining.append(orig_pos)
+                
+                # Store remaining original positions for use in semantic_concentration
+                self._gr00t_image_positions_remaining = image_orig_positions_remaining
+                
+                if not query_current_positions or not image_current_positions:
+                    # No valid positions after pruning, skip this iteration
+                    return
+                
+                query_positions = torch.tensor(query_current_positions, device=attn_weights.device)
+                image_positions = torch.tensor(image_current_positions, device=attn_weights.device)
+                
+                # Get attention from query to image using current positions
+                text_to_image_attn = attn_weights[:, :, query_positions, :][:, :, :, image_positions]
+            else:
+                # No pruning yet, use original positions directly
+                query_start = orig_query_start
+                query_end = orig_query_end
+                image_positions = torch.tensor(orig_image_positions, device=attn_weights.device)
+                
+                # NOTE: For token importance, we need query-to-image attention to measure
+                # image token importance. Since causal mask blocks this (query before images),
+                # the attn_weights passed here should be computed WITHOUT causal masking.
+                # This is handled by calc_attn_weights_qwen3 when called for gr00t.
+                text_to_image_attn = attn_weights[:, :, query_start:query_end, :][:, :, :, image_positions]
+            
+            # Max over heads and query positions to get importance per image token
+            # text_to_image_attn shape: [1, num_head, query_len, num_image_tokens]
+            text_to_image_attn = text_to_image_attn[0].max(dim=0)[0].max(dim=0)[0]
+        else:
+            # Original logic: query tokens at the END of sequence
+            image_start_index = self.image_token_start_index
+            query_token_length = self.query_token_length
 
-        text_to_image_attn = attn_weights[:, :, -query_token_length:, image_start_index:-query_token_length]
+            text_to_image_attn = attn_weights[:, :, -query_token_length:, image_start_index:-query_token_length]
 
-        # store text to image attn
-        # torch.save(text_to_image_attn, 'output/simi/text_to_image_attn.pth')
-        # raise NotImplementedError("text_to_image_attn is not used in the current version")
-
-        text_to_image_attn = text_to_image_attn[0].max(dim=0)[0].max(dim=0)[0]
-        # assert text_to_image_attn.shape == (self.image_token_length,)
+            text_to_image_attn = text_to_image_attn[0].max(dim=0)[0].max(dim=0)[0]
 
         self.token_importance = text_to_image_attn
         # self.visualize_token_importance(self.token_importance)
@@ -611,7 +807,12 @@ class Focus(nn.Module):
         for key, value in self.sparsity_dict_cur.items():
             weighted_avg_sparsity += value.avg * config_dict[key]
             sum_weight += config_dict[key]
-        weighted_avg_sparsity /= sum_weight
+        
+        # Handle case when no sparsity was recorded (empty sparsity_dict_cur)
+        if sum_weight == 0:
+            weighted_avg_sparsity = 0.0
+        else:
+            weighted_avg_sparsity /= sum_weight
 
         if weighted_avg_sparsity > self.maximum_sparsity:
             self.maximum_sparsity = weighted_avg_sparsity
@@ -684,6 +885,62 @@ class Focus(nn.Module):
 
                 self.focus_info = []
                 self.seq_len_info = []
+    
+    def get_sparsity_stats(self) -> dict:
+        """Get current sparsity statistics for reporting.
+        
+        Returns:
+            dict with sparsity metrics:
+                - vlm_avg_sparsity: Average sparsity across all layers
+                - sec_final_sparsity: Final sparsity from SEC (semantic concentration)
+                - layer_sparsity: Per-layer sparsity breakdown
+        """
+        def to_float(val):
+            """Convert Tensor or other numeric types to Python float."""
+            if hasattr(val, 'item'):
+                return float(val.item())
+            return float(val)
+        
+        stats = {
+            "vlm_avg_sparsity": 0.0,
+            "sec_final_sparsity": 0.0,
+            "layer_sparsity": {},
+        }
+        
+        # Calculate average sparsity across all tracked layers
+        if self.sparsity_dict:
+            total_sparsity = 0.0
+            count = 0
+            for name, meter in self.sparsity_dict.items():
+                if meter.count > 0:
+                    avg_val = to_float(meter.avg)
+                    stats["layer_sparsity"][name] = avg_val
+                    total_sparsity += avg_val
+                    count += 1
+            if count > 0:
+                stats["vlm_avg_sparsity"] = total_sparsity / count
+        
+        # Get SEC final sparsity from the last retained_ids if available
+        if hasattr(self, 'retained_ids') and self.retained_ids is not None and hasattr(self, 'original_length'):
+            retained_count = self.retained_ids.shape[0]
+            # Calculate sparsity as percentage of tokens pruned
+            if self.original_length > 0:
+                stats["sec_final_sparsity"] = 1.0 - (retained_count / self.original_length)
+        
+        # Use weighted average if available
+        if hasattr(self, 'weighted_avg_sparsity_list') and self.weighted_avg_sparsity_list:
+            total = sum(to_float(v) for v in self.weighted_avg_sparsity_list)
+            stats["vlm_avg_sparsity"] = total / len(self.weighted_avg_sparsity_list)
+        
+        return stats
+    
+    def reset_sparsity_stats(self):
+        """Reset sparsity statistics for a new episode/batch."""
+        for meter in self.sparsity_dict.values():
+            meter.reset()
+        self.sparsity_dict_cur = {}
+        if hasattr(self, 'weighted_avg_sparsity_list'):
+            self.weighted_avg_sparsity_list = []
     
     def recover_PE_and_AM(self, position_embeddings, attention_mask):
         assert self.retained_ids.shape[0] == position_embeddings[0].shape[-2], "The number of retained ids must be equal to the number of tokens in the position embeddings."

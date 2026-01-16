@@ -3,6 +3,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
+import random
 import time
 from typing import Any
 import uuid
@@ -78,6 +79,7 @@ class WrapperConfigs:
 
 def get_robocasa_env_fn(
     env_name: str,
+    seed: int | None = None,
 ):
     def env_fn():
         import os
@@ -87,7 +89,11 @@ def get_robocasa_env_fn(
         import robosuite  # noqa: F401
 
         os.environ["MUJOCO_GL"] = "egl"
-        return gym.make(env_name, enable_render=True)
+        # Pass seed to gym.make if seed is provided
+        if seed is not None:
+            return gym.make(env_name, enable_render=True, seed=seed)
+        else:
+            return gym.make(env_name, enable_render=True)
 
     return env_fn
 
@@ -157,7 +163,7 @@ def get_behavior_env_fn(
     return env_fn
 
 
-def get_gym_env(env_name: str, env_idx: int, total_n_envs: int):
+def get_gym_env(env_name: str, env_idx: int, total_n_envs: int, seed: int | None = None):
     """Create Ray environment factory function without wrappers."""
 
     env_embodiment = get_embodiment_tag_from_env_name(env_name)
@@ -166,7 +172,9 @@ def get_gym_env(env_name: str, env_idx: int, total_n_envs: int):
         EmbodimentTag.GR1,
         EmbodimentTag.ROBOCASA_PANDA_OMRON,
     ):
-        env_fn = get_robocasa_env_fn(env_name)
+        # For parallel environments, use env_idx as offset to ensure different seeds
+        env_seed = seed + env_idx if seed is not None else None
+        env_fn = get_robocasa_env_fn(env_name, seed=env_seed)
 
     elif env_embodiment in (EmbodimentTag.UNITREE_G1,):
         env_fn = get_groot_locomanip_env_fn(env_name)
@@ -186,7 +194,7 @@ def get_gym_env(env_name: str, env_idx: int, total_n_envs: int):
 
 
 def create_eval_env(
-    env_name: str, env_idx: int, total_n_envs: int, wrapper_configs: WrapperConfigs
+    env_name: str, env_idx: int, total_n_envs: int, wrapper_configs: WrapperConfigs, seed: int | None = None
 ) -> gym.Env:
     """Create a single evaluation environment with wrappers.
 
@@ -194,11 +202,12 @@ def create_eval_env(
         env_name: Name of the gymnasium environment to use
         idx: Environment index (used to determine video recording)
         wrapper_configs: Configuration for environment wrappers
+        seed: Random seed for environment initialization (None for random)
     Returns:
         Wrapped gymnasium environment
     """
 
-    env = get_gym_env(env_name, env_idx, total_n_envs)
+    env = get_gym_env(env_name, env_idx, total_n_envs, seed=seed)
     if wrapper_configs.video.video_dir is not None:
         from gr00t.eval.sim.wrapper.video_recording_wrapper import (
             VideoRecorder,
@@ -239,6 +248,7 @@ def run_rollout_gymnasium_policy(
     wrapper_configs: WrapperConfigs,
     n_episodes: int = 10,
     n_envs: int = 1,
+    seed: int | None = None,
 ) -> Any:
     """Run policy rollouts in parallel environments.
 
@@ -248,6 +258,7 @@ def run_rollout_gymnasium_policy(
         n_episodes: Number of episodes to run
         n_envs: Number of parallel environments
         wrapper_configs: Configuration for environment wrappers
+        seed: Random seed for environment initialization (None for random)
         ray_env: Whether to use ray gym env to create each env.
     Returns:
         Collection results from running the episodes
@@ -255,6 +266,8 @@ def run_rollout_gymnasium_policy(
     start_time = time.time()
     n_episodes = max(n_episodes, n_envs)
     print(f"Running collecting {n_episodes} episodes for {env_name} with {n_envs} vec envs")
+    if seed is not None:
+        print(f"Using fixed seed: {seed} (each parallel env will use seed + env_idx)")
 
     env_fns = [
         partial(
@@ -263,6 +276,7 @@ def run_rollout_gymnasium_policy(
             env_name=env_name,
             total_n_envs=n_envs,
             wrapper_configs=wrapper_configs,
+            seed=seed,
         )
         for idx in range(n_envs)
     ]
@@ -285,14 +299,32 @@ def run_rollout_gymnasium_policy(
     episode_successes = []
     episode_infos = defaultdict(list)
 
-    # Initial reset
-    observations, _ = env.reset()
+    # Initial reset with seed if provided
+    # For vectorized envs, we can pass a list of seeds (one per env)
+    # Each environment will use seed + env_idx for reproducibility
+    if seed is not None:
+        # Create a list of seeds, one for each environment
+        reset_seeds = [seed + idx for idx in range(n_envs)]
+    else:
+        reset_seeds = None
+    observations, _ = env.reset(seed=reset_seeds)
     policy.reset()
     i = 0
 
+    # Track sparsity statistics
+    sparsity_values = {"vlm_avg_sparsity": [], "sec_final_sparsity": []}
+    
     pbar = tqdm(total=n_episodes, desc="Episodes")
     while completed_episodes < n_episodes:
-        actions, _ = policy.get_action(observations)
+        actions, policy_info = policy.get_action(observations)
+        
+        # Collect sparsity from policy info if available
+        if isinstance(policy_info, dict) and "sparsity" in policy_info:
+            sparsity_info = policy_info["sparsity"]
+            if "vlm_avg_sparsity" in sparsity_info and sparsity_info["vlm_avg_sparsity"] > 0:
+                sparsity_values["vlm_avg_sparsity"].append(sparsity_info["vlm_avg_sparsity"])
+            if "sec_final_sparsity" in sparsity_info and sparsity_info["sec_final_sparsity"] > 0:
+                sparsity_values["sec_final_sparsity"].append(sparsity_info["sec_final_sparsity"])
         next_obs, rewards, terminations, truncations, env_infos = env.step(actions)
         # NOTE (FY): Currently we don't properly handle policy reset. For now, our policy are stateless,
         # but in the future if we need policy to be stateful, we need to detect env reset and call policy.reset()
@@ -381,6 +413,25 @@ def run_rollout_gymnasium_policy(
         episode_successes = [episode_successes[i] for i in valid_idxs]
         episode_infos = {k: [v[i] for i in valid_idxs] for k, v in episode_infos.items()}
 
+    # Add aggregated sparsity stats to episode_infos
+    if sparsity_values["vlm_avg_sparsity"]:
+        episode_infos["vlm_avg_sparsity"] = np.mean(sparsity_values["vlm_avg_sparsity"])
+        print(f"VLM Average Sparsity: {episode_infos['vlm_avg_sparsity']:.4f}")
+    if sparsity_values["sec_final_sparsity"]:
+        episode_infos["sec_final_sparsity"] = np.mean(sparsity_values["sec_final_sparsity"])
+        print(f"SEC Final Sparsity: {episode_infos['sec_final_sparsity']:.4f}")
+    
+    # Also try to get final sparsity stats from policy if it supports it
+    if hasattr(policy, 'get_sparsity_stats'):
+        try:
+            final_sparsity = policy.get_sparsity_stats()
+            if final_sparsity.get("vlm_avg_sparsity", 0) > 0:
+                episode_infos["vlm_avg_sparsity_final"] = final_sparsity["vlm_avg_sparsity"]
+            if final_sparsity.get("sec_final_sparsity", 0) > 0:
+                episode_infos["sec_final_sparsity_final"] = final_sparsity["sec_final_sparsity"]
+        except Exception:
+            pass
+
     return env_name, episode_successes, episode_infos
 
 
@@ -416,6 +467,7 @@ def run_gr00t_sim_policy(
     policy_client_port: int | None = None,
     n_envs: int = 8,
     n_action_steps: int = 8,
+    seed: int | None = None,
 ):
     embodiment_tag = get_embodiment_tag_from_env_name(env_name)
 
@@ -450,6 +502,7 @@ def run_gr00t_sim_policy(
         wrapper_configs=wrapper_configs,
         n_episodes=n_episodes,
         n_envs=n_envs,
+        seed=seed,
     )
     print("Video saved to: ", wrapper_configs.video.video_dir)
     return results
@@ -473,8 +526,14 @@ if __name__ == "__main__":
     )
     parser.add_argument("--n_envs", type=int, default=8)
     parser.add_argument("--n_action_steps", type=int, default=8)
+    parser.add_argument("--seed", type=int, default=None, help="Random seed for environment reproducibility (None for random)")
 
     args = parser.parse_args()
+    
+    # Set global random seeds if seed is provided
+    if args.seed is not None:
+        random.seed(args.seed)
+        np.random.seed(args.seed)
 
     # validate policy configuration
     assert (args.model_path and not (args.policy_client_host or args.policy_client_port)) or (
@@ -495,6 +554,14 @@ if __name__ == "__main__":
         policy_client_port=args.policy_client_port,
         n_envs=args.n_envs,
         n_action_steps=args.n_action_steps,
+        seed=args.seed,
     )
     print("results: ", results)
-    print("success rate: ", np.mean(results[1]))
+    print("success rate:", np.mean(results[1]))
+    
+    # Print sparsity stats if available
+    episode_infos = results[2] if len(results) > 2 else {}
+    if "vlm_avg_sparsity" in episode_infos:
+        print(f"vlm_avg_sparsity: {episode_infos['vlm_avg_sparsity']:.4f}")
+    if "sec_final_sparsity" in episode_infos:
+        print(f"sec_final_sparsity: {episode_infos['sec_final_sparsity']:.4f}")

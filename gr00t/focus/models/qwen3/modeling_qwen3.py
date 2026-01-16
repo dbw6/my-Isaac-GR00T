@@ -315,56 +315,40 @@ def calc_attn_weights_qwen3(
 ):
     """
     Calculate attention weights for Focus token importance estimation.
+    Matches the pattern from eager_attention_forward in Qwen3.
     """
-    is_causal = None
     scale = self.scaling
      
     query = query_states.clone()
     key = key_states.clone()
 
-    dropout_p = 0.0
+    # Repeat key/value for GQA (same as eager_attention_forward)
     if hasattr(self, "num_key_value_groups"):
         key = repeat_kv(key, self.num_key_value_groups)
-
-    causal_mask = attention_mask
-    if attention_mask is not None:
-        causal_mask = causal_mask[:, :, :, : key.shape[-2]]
     
     query = query.contiguous()
     key = key.contiguous()
 
-    if is_causal is None:
-        is_causal = causal_mask is None and query.shape[2] > 1
-
-    if torch.jit.is_tracing() and isinstance(is_causal, torch.Tensor):
-        is_causal = is_causal.item()
-
-    attn_mask = causal_mask
-    L, S = query.size(-2), key.size(-2)
-    scale_factor = 1 / math.sqrt(query.size(-1)) if scale is None else scale
-
-    if attn_mask is not None:
-        attn_bias = torch.zeros_like(attn_mask, dtype=query.dtype)
-    else:
-        attn_bias = torch.zeros(L, S, dtype=query.dtype)
-
-    if is_causal:
-        assert attn_mask is None
-        temp_mask = torch.ones(L, S, dtype=torch.bool).tril(diagonal=0)
-        attn_bias.masked_fill_(temp_mask.logical_not(), -1e4)
-        attn_bias.to(query.dtype)
-
-    if attn_mask is not None:
-        if attn_mask.dtype == torch.bool:
-            attn_bias.masked_fill_(attn_mask.logical_not(), -1e4)
-        else:
-            attn_bias += attn_mask
+    # For gr00t model, we need NON-CAUSAL attention to compute query-to-image attention
+    # (since query comes before images, causal masking would block this)
+    is_gr00t = hasattr(self, 'focus') and self.focus.model_name == 'gr00t'
     
-    attn_weight = query @ key.transpose(-2, -1) * scale_factor
-    attn_weight += attn_bias.to(query.device)
-    attn_weight = torch.softmax(attn_weight, dim=-1)
+    # Compute attention weights: query @ key^T * scaling (same as eager_attention_forward)
+    # Use transpose(2, 3) to match eager_attention_forward pattern
+    attn_weights = torch.matmul(query, key.transpose(2, 3)) * scale
+    
+    # Handle attention mask (same pattern as eager_attention_forward)
+    if attention_mask is not None:
+        if is_gr00t:
+            # For gr00t, disable causal masking - set mask to None to allow query-to-image attention
+            # The attention_mask passed here typically contains causal mask, so we ignore it
+            pass  # Don't add causal mask for gr00t
+        else:
+            # Original behavior: add causal mask
+            causal_mask = attention_mask[:, :, :, : key.shape[-2]]
+            attn_weights = attn_weights + causal_mask
+    
+    # Apply softmax (same as eager_attention_forward, but without float32 cast for efficiency)
+    attn_weights = torch.softmax(attn_weights, dim=-1)
 
-    return attn_weight
-
-
-
+    return attn_weights

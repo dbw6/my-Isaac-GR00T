@@ -6,14 +6,14 @@
 set -e
 
 # Configuration
-N_EPISODES=${N_EPISODES:-10}
-N_ENVS=${N_ENVS:-5}
+N_EPISODES=${N_EPISODES:-5}
+N_ENVS=${N_ENVS:-1}
 MAX_STEPS=${MAX_STEPS:-720}
 N_ACTION_STEPS=${N_ACTION_STEPS:-8}
 BASE_PORT=${BASE_PORT:-5555}
-
+SEED=${SEED:-42}
 # GPUs to use (space-separated list, e.g., "0 1 2 3")
-GPUS=${GPUS:-"2 3 4 6"}
+GPUS=${GPUS:-"1 2"}
 GPU_ARRAY=($GPUS)
 NUM_GPUS=${#GPU_ARRAY[@]}
 
@@ -29,28 +29,28 @@ mkdir -p "$RESULTS_DIR"
 TASKS=(
     "robocasa_panda_omron/CoffeeSetupMug_PandaOmron_Env"
     "robocasa_panda_omron/CoffeeServeMug_PandaOmron_Env"
-    "robocasa_panda_omron/CoffeePressButton_PandaOmron_Env"
-    "robocasa_panda_omron/OpenSingleDoor_PandaOmron_Env"
-    "robocasa_panda_omron/OpenDoubleDoor_PandaOmron_Env"
-    "robocasa_panda_omron/CloseSingleDoor_PandaOmron_Env"
-    "robocasa_panda_omron/CloseDoubleDoor_PandaOmron_Env"
-    "robocasa_panda_omron/OpenDrawer_PandaOmron_Env"
-    "robocasa_panda_omron/CloseDrawer_PandaOmron_Env"
-    "robocasa_panda_omron/TurnOnMicrowave_PandaOmron_Env"
-    "robocasa_panda_omron/TurnOffMicrowave_PandaOmron_Env"
-    "robocasa_panda_omron/PnPCounterToCab_PandaOmron_Env"
-    "robocasa_panda_omron/PnPCabToCounter_PandaOmron_Env"
-    "robocasa_panda_omron/PnPCounterToSink_PandaOmron_Env"
-    "robocasa_panda_omron/PnPSinkToCounter_PandaOmron_Env"
-    "robocasa_panda_omron/PnPCounterToMicrowave_PandaOmron_Env"
-    "robocasa_panda_omron/PnPMicrowaveToCounter_PandaOmron_Env"
-    "robocasa_panda_omron/PnPCounterToStove_PandaOmron_Env"
-    "robocasa_panda_omron/PnPStoveToCounter_PandaOmron_Env"
-    "robocasa_panda_omron/TurnOnSinkFaucet_PandaOmron_Env"
-    "robocasa_panda_omron/TurnOffSinkFaucet_PandaOmron_Env"
-    "robocasa_panda_omron/TurnSinkSpout_PandaOmron_Env"
-    "robocasa_panda_omron/TurnOnStove_PandaOmron_Env"
-    "robocasa_panda_omron/TurnOffStove_PandaOmron_Env"
+    # "robocasa_panda_omron/CoffeePressButton_PandaOmron_Env"
+    # "robocasa_panda_omron/OpenSingleDoor_PandaOmron_Env"
+    # "robocasa_panda_omron/OpenDoubleDoor_PandaOmron_Env"
+    # "robocasa_panda_omron/CloseSingleDoor_PandaOmron_Env"
+    # "robocasa_panda_omron/CloseDoubleDoor_PandaOmron_Env"
+    # "robocasa_panda_omron/OpenDrawer_PandaOmron_Env"
+    # "robocasa_panda_omron/CloseDrawer_PandaOmron_Env"
+    # "robocasa_panda_omron/TurnOnMicrowave_PandaOmron_Env"
+    # "robocasa_panda_omron/TurnOffMicrowave_PandaOmron_Env"
+    # "robocasa_panda_omron/PnPCounterToCab_PandaOmron_Env"
+    # "robocasa_panda_omron/PnPCabToCounter_PandaOmron_Env"
+    # "robocasa_panda_omron/PnPCounterToSink_PandaOmron_Env"
+    # "robocasa_panda_omron/PnPSinkToCounter_PandaOmron_Env"
+    # "robocasa_panda_omron/PnPCounterToMicrowave_PandaOmron_Env"
+    # "robocasa_panda_omron/PnPMicrowaveToCounter_PandaOmron_Env"
+    # "robocasa_panda_omron/PnPCounterToStove_PandaOmron_Env"
+    # "robocasa_panda_omron/PnPStoveToCounter_PandaOmron_Env"
+    # "robocasa_panda_omron/TurnOnSinkFaucet_PandaOmron_Env"
+    # "robocasa_panda_omron/TurnOffSinkFaucet_PandaOmron_Env"
+    # "robocasa_panda_omron/TurnSinkSpout_PandaOmron_Env"
+    # "robocasa_panda_omron/TurnOnStove_PandaOmron_Env"
+    # "robocasa_panda_omron/TurnOffStove_PandaOmron_Env"
 )
 
 NUM_TASKS=${#TASKS[@]}
@@ -99,6 +99,7 @@ for i in "${!GPU_ARRAY[@]}"; do
         --embodiment-tag ROBOCASA_PANDA_OMRON \
         --use-sim-policy-wrapper \
         --port $PORT \
+        --focus \
         > "$RESULTS_DIR/server_gpu${GPU}.log" 2>&1 &
     
     SERVER_PIDS+=($!)
@@ -177,6 +178,7 @@ worker() {
             --env_name "$TASK" \
             --n_action_steps $N_ACTION_STEPS \
             --n_envs $N_ENVS \
+            --seed $SEED \
             > "$OUTPUT_FILE" 2>&1
         
         # Extract and display result
@@ -212,13 +214,16 @@ echo "=============================================" >> "$FINAL_RESULTS"
 echo "" >> "$FINAL_RESULTS"
 
 # Print results table
-echo "| Task | Success Rate |"
-echo "| ---- | ------------ |"
-echo "| Task | Success Rate |" >> "$FINAL_RESULTS"
-echo "| ---- | ------------ |" >> "$FINAL_RESULTS"
+echo "| Task | Success Rate | VLM Sparsity | SEC Sparsity |"
+echo "| ---- | ------------ | ------------ | ------------ |"
+echo "| Task | Success Rate | VLM Sparsity | SEC Sparsity |" >> "$FINAL_RESULTS"
+echo "| ---- | ------------ | ------------ | ------------ |" >> "$FINAL_RESULTS"
 
 SUM=0
 COUNT=0
+VLM_SPARSITY_SUM=0
+SEC_SPARSITY_SUM=0
+SPARSITY_COUNT=0
 
 for TASK in "${TASKS[@]}"; do
     TASK_NAME=$(echo "$TASK" | cut -d'/' -f2)
@@ -226,30 +231,67 @@ for TASK in "${TASKS[@]}"; do
     
     if [ -f "$OUTPUT_FILE" ]; then
         SUCCESS_RATE=$(grep "success rate:" "$OUTPUT_FILE" | tail -1 | awk '{print $NF}')
+        VLM_SPARSITY=$(grep "vlm_avg_sparsity:" "$OUTPUT_FILE" | tail -1 | awk '{print $NF}')
+        SEC_SPARSITY=$(grep "sec_final_sparsity:" "$OUTPUT_FILE" | tail -1 | awk '{print $NF}')
+        
         if [ -n "$SUCCESS_RATE" ] && [ "$SUCCESS_RATE" != "N/A" ]; then
             PCT=$(echo "scale=1; $SUCCESS_RATE * 100" | bc -l)
-            echo "| \`$TASK\` | ${PCT}% |"
-            echo "| \`$TASK\` | ${PCT}% |" >> "$FINAL_RESULTS"
+            
+            # Format sparsity values
+            VLM_PCT="N/A"
+            SEC_PCT="N/A"
+            if [ -n "$VLM_SPARSITY" ] && [ "$VLM_SPARSITY" != "0" ]; then
+                VLM_PCT=$(echo "scale=2; $VLM_SPARSITY * 100" | bc -l)
+                VLM_SPARSITY_SUM=$(echo "$VLM_SPARSITY_SUM + $VLM_SPARSITY" | bc -l)
+                SPARSITY_COUNT=$((SPARSITY_COUNT + 1))
+            fi
+            if [ -n "$SEC_SPARSITY" ] && [ "$SEC_SPARSITY" != "0" ]; then
+                SEC_PCT=$(echo "scale=2; $SEC_SPARSITY * 100" | bc -l)
+                SEC_SPARSITY_SUM=$(echo "$SEC_SPARSITY_SUM + $SEC_SPARSITY" | bc -l)
+            fi
+            
+            echo "| \`$TASK\` | ${PCT}% | ${VLM_PCT}% | ${SEC_PCT}% |"
+            echo "| \`$TASK\` | ${PCT}% | ${VLM_PCT}% | ${SEC_PCT}% |" >> "$FINAL_RESULTS"
             SUM=$(echo "$SUM + $SUCCESS_RATE" | bc -l)
             COUNT=$((COUNT + 1))
         else
-            echo "| \`$TASK\` | N/A |"
-            echo "| \`$TASK\` | N/A |" >> "$FINAL_RESULTS"
+            echo "| \`$TASK\` | N/A | N/A | N/A |"
+            echo "| \`$TASK\` | N/A | N/A | N/A |" >> "$FINAL_RESULTS"
         fi
     else
-        echo "| \`$TASK\` | MISSING |"
-        echo "| \`$TASK\` | MISSING |" >> "$FINAL_RESULTS"
+        echo "| \`$TASK\` | MISSING | N/A | N/A |"
+        echo "| \`$TASK\` | MISSING | N/A | N/A |" >> "$FINAL_RESULTS"
     fi
 done
 
-# Calculate and print average
+# Calculate and print averages
 if [ $COUNT -gt 0 ]; then
     AVERAGE=$(echo "scale=4; $SUM / $COUNT" | bc -l)
     AVERAGE_PCT=$(echo "scale=2; $AVERAGE * 100" | bc -l)
-    echo "| **Average** | ${AVERAGE_PCT}% |"
-    echo "| **Average** | ${AVERAGE_PCT}% |" >> "$FINAL_RESULTS"
+    
+    # Calculate sparsity averages if available
+    VLM_AVG_PCT="N/A"
+    SEC_AVG_PCT="N/A"
+    if [ $SPARSITY_COUNT -gt 0 ]; then
+        VLM_AVG=$(echo "scale=4; $VLM_SPARSITY_SUM / $SPARSITY_COUNT" | bc -l)
+        VLM_AVG_PCT=$(echo "scale=2; $VLM_AVG * 100" | bc -l)
+        SEC_AVG=$(echo "scale=4; $SEC_SPARSITY_SUM / $SPARSITY_COUNT" | bc -l)
+        SEC_AVG_PCT=$(echo "scale=2; $SEC_AVG * 100" | bc -l)
+    fi
+    
+    echo "| **Average** | ${AVERAGE_PCT}% | ${VLM_AVG_PCT}% | ${SEC_AVG_PCT}% |"
+    echo "| **Average** | ${AVERAGE_PCT}% | ${VLM_AVG_PCT}% | ${SEC_AVG_PCT}% |" >> "$FINAL_RESULTS"
 fi
 
+echo ""
+echo "=============================================="
+echo "SUMMARY"
+echo "=============================================="
+echo "Success Rate Average: ${AVERAGE_PCT}%"
+if [ $SPARSITY_COUNT -gt 0 ]; then
+    echo "VLM Average Sparsity: ${VLM_AVG_PCT}%"
+    echo "SEC Final Sparsity: ${SEC_AVG_PCT}%"
+fi
 echo ""
 echo "Results saved to: $FINAL_RESULTS"
 echo "Individual task logs saved in: $RESULTS_DIR/"
