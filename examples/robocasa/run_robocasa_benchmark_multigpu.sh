@@ -6,14 +6,14 @@
 set -e
 
 # Configuration
-N_EPISODES=${N_EPISODES:-5}
+N_EPISODES=${N_EPISODES:-100}
 N_ENVS=${N_ENVS:-1}
 MAX_STEPS=${MAX_STEPS:-720}
 N_ACTION_STEPS=${N_ACTION_STEPS:-8}
 BASE_PORT=${BASE_PORT:-5555}
 SEED=${SEED:-42}
 # GPUs to use (space-separated list, e.g., "0 1 2 3")
-GPUS=${GPUS:-"1 2"}
+GPUS=${GPUS:-"7"}
 GPU_ARRAY=($GPUS)
 NUM_GPUS=${#GPU_ARRAY[@]}
 
@@ -29,28 +29,28 @@ mkdir -p "$RESULTS_DIR"
 TASKS=(
     "robocasa_panda_omron/CoffeeSetupMug_PandaOmron_Env"
     "robocasa_panda_omron/CoffeeServeMug_PandaOmron_Env"
-    # "robocasa_panda_omron/CoffeePressButton_PandaOmron_Env"
-    # "robocasa_panda_omron/OpenSingleDoor_PandaOmron_Env"
-    # "robocasa_panda_omron/OpenDoubleDoor_PandaOmron_Env"
-    # "robocasa_panda_omron/CloseSingleDoor_PandaOmron_Env"
-    # "robocasa_panda_omron/CloseDoubleDoor_PandaOmron_Env"
-    # "robocasa_panda_omron/OpenDrawer_PandaOmron_Env"
-    # "robocasa_panda_omron/CloseDrawer_PandaOmron_Env"
-    # "robocasa_panda_omron/TurnOnMicrowave_PandaOmron_Env"
-    # "robocasa_panda_omron/TurnOffMicrowave_PandaOmron_Env"
-    # "robocasa_panda_omron/PnPCounterToCab_PandaOmron_Env"
-    # "robocasa_panda_omron/PnPCabToCounter_PandaOmron_Env"
-    # "robocasa_panda_omron/PnPCounterToSink_PandaOmron_Env"
-    # "robocasa_panda_omron/PnPSinkToCounter_PandaOmron_Env"
-    # "robocasa_panda_omron/PnPCounterToMicrowave_PandaOmron_Env"
-    # "robocasa_panda_omron/PnPMicrowaveToCounter_PandaOmron_Env"
-    # "robocasa_panda_omron/PnPCounterToStove_PandaOmron_Env"
-    # "robocasa_panda_omron/PnPStoveToCounter_PandaOmron_Env"
-    # "robocasa_panda_omron/TurnOnSinkFaucet_PandaOmron_Env"
-    # "robocasa_panda_omron/TurnOffSinkFaucet_PandaOmron_Env"
-    # "robocasa_panda_omron/TurnSinkSpout_PandaOmron_Env"
-    # "robocasa_panda_omron/TurnOnStove_PandaOmron_Env"
-    # "robocasa_panda_omron/TurnOffStove_PandaOmron_Env"
+    "robocasa_panda_omron/CoffeePressButton_PandaOmron_Env"
+    "robocasa_panda_omron/OpenSingleDoor_PandaOmron_Env"
+    "robocasa_panda_omron/OpenDoubleDoor_PandaOmron_Env"
+    "robocasa_panda_omron/CloseSingleDoor_PandaOmron_Env"
+    "robocasa_panda_omron/CloseDoubleDoor_PandaOmron_Env"
+    "robocasa_panda_omron/OpenDrawer_PandaOmron_Env"
+    "robocasa_panda_omron/CloseDrawer_PandaOmron_Env"
+    "robocasa_panda_omron/TurnOnMicrowave_PandaOmron_Env"
+    "robocasa_panda_omron/TurnOffMicrowave_PandaOmron_Env"
+    "robocasa_panda_omron/PnPCounterToCab_PandaOmron_Env"
+    "robocasa_panda_omron/PnPCabToCounter_PandaOmron_Env"
+    "robocasa_panda_omron/PnPCounterToSink_PandaOmron_Env"
+    "robocasa_panda_omron/PnPSinkToCounter_PandaOmron_Env"
+    "robocasa_panda_omron/PnPCounterToMicrowave_PandaOmron_Env"
+    "robocasa_panda_omron/PnPMicrowaveToCounter_PandaOmron_Env"
+    "robocasa_panda_omron/PnPCounterToStove_PandaOmron_Env"
+    "robocasa_panda_omron/PnPStoveToCounter_PandaOmron_Env"
+    "robocasa_panda_omron/TurnOnSinkFaucet_PandaOmron_Env"
+    "robocasa_panda_omron/TurnOffSinkFaucet_PandaOmron_Env"
+    "robocasa_panda_omron/TurnSinkSpout_PandaOmron_Env"
+    "robocasa_panda_omron/TurnOnStove_PandaOmron_Env"
+    "robocasa_panda_omron/TurnOffStove_PandaOmron_Env"
 )
 
 NUM_TASKS=${#TASKS[@]}
@@ -178,7 +178,6 @@ worker() {
             --env_name "$TASK" \
             --n_action_steps $N_ACTION_STEPS \
             --n_envs $N_ENVS \
-            --seed $SEED \
             > "$OUTPUT_FILE" 2>&1
         
         # Extract and display result
